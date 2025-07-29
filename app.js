@@ -79,8 +79,19 @@ class HackerNewsApp {
     }
 
     async fetchStoryIds(category = 'topstories') {
-        const result = await this.fetchWithRateLimit(`${this.API_BASE}/${category}.json`);
-        return result || [];
+        if (category === 'polls') {
+            // Fetch many topstories and filter polls
+            const allIds = await this.fetchWithRateLimit(`${this.API_BASE}/topstories.json`);
+            if (!allIds) return [];
+            // Limit to first 100 to avoid too many requests
+            const limitedIds = allIds.slice(0, 100);
+            const items = await Promise.all(limitedIds.map(id => this.fetchItem(id)));
+            const pollIds = items.filter(item => item && item.type === 'poll').map(item => item.id);
+            return pollIds;
+        } else {
+            const result = await this.fetchWithRateLimit(`${this.API_BASE}/${category}.json`);
+            return result || [];
+        }
     }
 
     // Throttle function for live updates (5 seconds)
@@ -105,7 +116,7 @@ class HackerNewsApp {
     // Post Loading Methods
     async loadPosts(append = false) {
         if (this.isLoading) return;
-        
+
         if (!append) {
             this.isLoading = true;
             this.showLoading(true);
@@ -125,10 +136,18 @@ class HackerNewsApp {
 
             const postPromises = pageIds.map(id => this.fetchItem(id));
             const fetchedPosts = await Promise.all(postPromises);
-            const validPosts = fetchedPosts.filter(post => post && !post.deleted);
+            let validPosts = fetchedPosts.filter(post => post && !post.deleted);
 
             // Sort by time (newest first)
             validPosts.sort((a, b) => b.time - a.time);
+
+            // Add poll 126809 only if currentCategory is 'polls'
+            if (this.currentCategory === 'polls') {
+                const pollPost = await this.fetchItem(126809);
+                if (pollPost && !pollPost.deleted && !validPosts.some(p => p.id === pollPost.id)) {
+                    validPosts.unshift(pollPost);
+                }
+            }
 
             if (append) {
                 this.posts = [...this.posts, ...validPosts];
@@ -252,7 +271,26 @@ class HackerNewsApp {
         `;
 
         const contentDiv = document.getElementById('modal-content');
-        if (post.text) {
+
+        if (post.type === 'poll') {
+            if (!post.parts || post.parts.length === 0) {
+                contentDiv.innerHTML = '<div>No poll options available.</div>';
+            } else {
+                // Fetch all poll options details
+                contentDiv.innerHTML = '<div>Loading poll options...</div>';
+
+                try {
+                    const optionPromises = post.parts.map(id => this.fetchItem(id));
+                    const options = await Promise.all(optionPromises);
+                    const validOptions = options.filter(opt => opt && !opt.deleted);
+
+                    contentDiv.innerHTML = this.renderPoll(post, validOptions);
+                } catch (error) {
+                    contentDiv.innerHTML = '<div>Error loading poll options.</div>';
+                    console.error('Error loading poll options:', error);
+                }
+            }
+        } else if (post.text) {
             contentDiv.innerHTML = `<div style="margin-bottom: 20px;">${post.text}</div>`;
         } else if (post.url) {
             contentDiv.innerHTML = `<div style="margin-bottom: 20px;"><a href="${post.url}" target="_blank" style="color: #ff6600;">🔗 ${post.url}</a></div>`;
@@ -267,6 +305,24 @@ class HackerNewsApp {
             document.getElementById('comments-container').innerHTML = '<div class="no-updates">No comments yet.</div>';
             document.querySelector('.comments-loading').style.display = 'none';
         }
+    }
+
+    renderPoll(poll, options) {
+        let html = '<div class="poll-container" style="margin-bottom: 20px;">';
+        html += '<h3>Poll Options:</h3><ul style="list-style: none; padding: 0;">';
+
+        options.forEach(option => {
+            const text = option.text || '(No text)';
+            const score = option.score || 0;
+            html += `
+                <li style="margin-bottom: 10px; padding: 8px; border: 1px solid #ddd; border-radius: 5px;">
+                    <strong>${this.escapeHtml(text)}</strong> - Votes: ${score}
+                </li>
+            `;
+        });
+
+        html += '</ul></div>';
+        return html;
     }
 
     closeModal() {
